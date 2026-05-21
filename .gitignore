@@ -1,0 +1,6 @@
+# Build artifacts
+API/platform/linux/api/.obj/
+API/platform/linux/api/out/
+API/platform/linux/api/*.so
+API/platform/linux/api/*.map
+API/platform/linux/api/log.txt

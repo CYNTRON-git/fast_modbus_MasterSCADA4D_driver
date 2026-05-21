@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{97499DC4-08B3-412A-A27E-FC7D3673B8B5}</ProjectGuid>
+  </PropertyGroup>
+  <ItemGroup>
+    <ClInclude Include="fast_modbus_protocol.h" />
+    <ClInclude Include="mplc_cyntron.h" />
+    <ClInclude Include="modbus_rtu_protocol.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="fast_modbus_protocol.cpp" />
+    <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="mplc_cyntron.cpp" />
+    <ClCompile Include="modbus_rtu_protocol.cpp" />
+  </ItemGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <PreprocessorDefinitions>MPLC_ADDIN_EXPORTS;WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <PreprocessorDefinitions>MPLC_ADDIN_EXPORTS;WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <PreprocessorDefinitions>MPLC_ADDIN_EXPORTS;WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <PreprocessorDefinitions>MPLC_ADDIN_EXPORTS;WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+    </Link>
+  </ItemDefinitionGroup>
+  <ImportGroup Label="MplcConfiguration">
+    <Import Project="$(SolutionDir)\props\configurations.props" Label="ProjectConfigurations" />
+    <Import Project="$(SolutionDir)\props\mplc_shared.props" Label="Configuration" />
+    <Import Project="$(SolutionDir)\props\mplc_build_config.props" />
+  </ImportGroup>
+</Project>
