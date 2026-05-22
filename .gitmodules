@@ -1,0 +1,4 @@
+[submodule "API"]
+	path = API
+	url = https://github.com/CYNTRON-git/PCA9536-driver-for-MasterPLC.git
+	branch = 1.0.1
