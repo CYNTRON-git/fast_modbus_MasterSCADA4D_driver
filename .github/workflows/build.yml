@@ -4,31 +4,23 @@ on:
   push:
     branches: ["**"]
     paths:
-      - "API/examples/mplc_protocol_fast_modbus/**"
-      - "API/include/**"
-      - "API/lib/**"
-      - "API/platform/linux/api/Makefile"
+      - "mplc_protocol_fast_modbus/**"
+      - "platform/linux/api/Makefile"
       - "build.sh"
       - ".github/workflows/build.yml"
   pull_request:
     paths:
-      - "API/examples/mplc_protocol_fast_modbus/**"
-      - "API/include/**"
-      - "API/lib/**"
+      - "mplc_protocol_fast_modbus/**"
+      - "platform/linux/api/Makefile"
 
 jobs:
-  # ----------------------------------------------------------------
-  # ARM 32-bit (SA-02m, MR-02m target)
-  # ----------------------------------------------------------------
   build-armv7hf:
     name: Build ARMv7hf (SA-02m)
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository (with submodules)
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install ARM cross-compiler
         run: |
@@ -37,39 +29,36 @@ jobs:
             gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf make
 
       - name: Restore SDK libraries cache
-        id: sdk-cache
         uses: actions/cache@v4
         with:
-          path: API/platform/linux/api/mplc_lib_so
-          key: mplc-sdk-armv7hf-${{ hashFiles('API/platform/linux/api/mplc_lib_so/*.so') }}
+          path: platform/linux/api/mplc_lib_so
+          key: mplc-sdk-armv7hf-${{ hashFiles('platform/linux/api/mplc_lib_so/*.so') }}
 
       - name: Check SDK libraries present
         run: |
           LIBS=(masterplc.so mplcshare.so mplc_archive.so opcua.so liblua.so mplc_events.so)
           MISSING=()
           for lib in "${LIBS[@]}"; do
-            [[ -f "API/platform/linux/api/mplc_lib_so/${lib}" ]] || MISSING+=("${lib}")
+            [[ -f "platform/linux/api/mplc_lib_so/${lib}" ]] || MISSING+=("${lib}")
           done
           if [[ ${#MISSING[@]} -gt 0 ]]; then
             echo "::warning::SDK libraries missing: ${MISSING[*]}"
-            echo "::warning::Populate API/platform/linux/api/mplc_lib_so/ via a GitHub secret/artifact."
+            echo "::warning::Populate platform/linux/api/mplc_lib_so/ (see docs/BUILD_INSTRUCTIONS.md)."
+            echo "SKIP_BUILD=1" >> "$GITHUB_ENV"
+          fi
+          if [[ ! -d "API/include" ]]; then
+            echo "::warning::API/include missing — copy MasterSCADA 4D API SDK into API/ locally."
             echo "SKIP_BUILD=1" >> "$GITHUB_ENV"
           fi
 
       - name: Build (ARMv7hf)
         if: env.SKIP_BUILD != '1'
-        run: |
-          cd API/platform/linux/api
-          CXX=arm-linux-gnueabihf-g++ \
-          CC=arm-linux-gnueabihf-gcc \
-          MPLCLIBS="$(pwd)/mplc_lib_so" \
-          DEPs="mplc_lib_so/masterplc.so mplc_lib_so/mplc_archive.so mplc_lib_so/mplcshare.so mplc_lib_so/opcua.so mplc_lib_so/liblua.so mplc_lib_so/mplc_events.so" \
-          make -j"$(nproc)" mplc_protocol_fast_modbus
+        run: ./build.sh linux-armv7hf
 
       - name: Verify output
         if: env.SKIP_BUILD != '1'
         run: |
-          OUT=API/platform/linux/api/mplc_protocol_fast_modbus.so
+          OUT=platform/linux/api/mplc_protocol_fast_modbus.so
           ls -lh "${OUT}"
           file "${OUT}" | grep -q "ARM" && echo "OK: ARM ELF" || { echo "ERROR: Not ARM ELF"; exit 1; }
           file "${OUT}" | grep -q "32-bit" && echo "OK: 32-bit" || { echo "ERROR: Not 32-bit"; exit 1; }
@@ -79,12 +68,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mplc_protocol_fast_modbus-armv7hf
-          path: API/platform/linux/api/mplc_protocol_fast_modbus.so
+          path: platform/linux/api/mplc_protocol_fast_modbus.so
           retention-days: 30
 
-  # ----------------------------------------------------------------
-  # x86-64 syntax check (no SDK libs needed for compile-check)
-  # ----------------------------------------------------------------
   syntax-check-x64:
     name: Syntax check (x86-64, no SDK)
     runs-on: ubuntu-latest
@@ -92,15 +78,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install build tools
         run: sudo apt-get install -y --no-install-recommends make g++
 
       - name: Compile driver sources (syntax only, no link)
         run: |
-          SRCDIR=API/examples/mplc_protocol_fast_modbus
+          if [[ ! -d "API/include" ]]; then
+            echo "::notice::API/include not in repo — syntax check needs local SDK (docs/BUILD_INSTRUCTIONS.md)."
+            exit 0
+          fi
+          SRCDIR=mplc_protocol_fast_modbus
           INCLUDES="-IAPI/include -IAPI/include/core -IAPI/lib -IAPI/lib/opcua -I${SRCDIR}"
           DEFINES="-DLINUX -D_GNUC_ -DTARGET_PLATFORM_NAME=\"\" -D'BOOST_USER_CONFIG=<mplc/detail/mplc_boost_config.hpp>'"
           FLAGS="-std=c++14 -Wno-narrowing -fpermissive -O2 -fPIC -D_DEFAULT_SOURCE"
@@ -113,7 +101,6 @@ jobs:
                      ${SRCDIR}/fast_modbus_protocol.cpp \
                      ${SRCDIR}/mplc_fast_modbus.cpp; do
             echo "Compiling $(basename ${src})..."
-            # Use || true: link errors are expected (no SDK .so), compile errors fail the step
             g++ ${FLAGS} ${INCLUDES} ${DEFINES} -c "${src}" -o "${OBJDIR}/$(basename ${src} .cpp).o" || {
               echo "::error file=${src}::Compile error"
               ERRORS=$((ERRORS+1))

@@ -3,7 +3,7 @@
 Пользовательский протокол **Fast Modbus** для системы MasterSCADA 4D — событийный опрос устройств по RS-485 с управлением приоритетами событий и защитой от спама частоменяющихся параметров.
 
 > **Целевая платформа:** SA-02m / контроллеры с MasterSCADA 4D на Linux ARMv7hf  
-> **Эталон:** прошивка [MR-02m](https://github.com/CYNTRON-git/MR-02m) (slave) + [MR-02m-flasher](https://github.com/CYNTRON-git/MR-02m-flasher) (master-reference), протокол Wiren Board Fast Modbus WB-extension
+> **Эталон:** внутренняя прошивка слейва и эталонная реализация мастера (приватные репозитории), протокол Wiren Board Fast Modbus WB-extension; сверка — `docs/MODBUS_AND_FAST_MODBUS_COMPLIANCE.md`, `docs/PROTOCOL_FIXES.md`
 
 ---
 
@@ -182,41 +182,35 @@ sync_device_priorities() при каждом Execute(), пока probe не за
 ## Структура проекта
 
 ```
-fast_modbus_MasterSCADA4D_driver/
+fast_modbus_MasterSCADA4D_driver/     ← этот репозиторий (драйвер Fast Modbus)
 │
-├── README.md                          ← этот файл
-├── build.sh                           ← воспроизводимый скрипт сборки
-├── .github/
-│   └── workflows/
-│       └── build.yml                  ← CI/CD: ARM build + syntax check
+├── README.md
+├── build.sh                           ← сборка mplc_protocol_fast_modbus.so
+├── mplc_protocol_fast_modbus/         ← ИСХОДНИКИ ДРАЙВЕРА (в git)
+│   ├── fmb_defs.h                     ← константы протокола
+│   ├── fmb_transport.h/.cpp         ← RS-485, CRC-16, t3.5
+│   ├── fmb_frames.h/.cpp              ← кадры Fast Modbus и RTU
+│   ├── fmb_event_filter.h             ← антиспам
+│   ├── fast_modbus_channel.h/.cpp
+│   ├── fast_modbus_module.h/.cpp
+│   ├── fast_modbus_protocol.h/.cpp
+│   ├── mplc_fast_modbus.cpp           ← регистрация в MasterSCADA 4D
+│   └── dllmain.cpp                    ← Windows DLL entry (Linux не используется)
 │
-├── docs/
-│   ├── BUILD_INSTRUCTIONS.md          ← инструкция по подготовке окружения
-│   ├── FASTMODBUS_ANALYSIS.md         ← анализ протокола
-│   ├── FAST_MODBUS_PROTOCOL_ANALYSIS.md
-│   ├── MODBUS_AND_FAST_MODBUS_COMPLIANCE.md ← соответствие эталонам
-│   ├── MODBUS_RTU_README.md
-│   └── PROTOCOL_FIXES.md              ← лог исправлений по эталону MR-02m
+├── platform/linux/api/
+│   ├── Makefile                       ← сборка только fast_modbus
+│   ├── mplc_lib_so/                   ← SDK .so с контроллера (не в git)
+│   └── mplc_protocol_fast_modbus.so   ← результат сборки
 │
-└── API/                               ← git submodule (SDK MasterSCADA 4D)
-    ├── include/                       ← заголовки SDK (не редактировать)
-    ├── lib/                           ← библиотеки SDK
-    ├── platform/linux/api/
-    │   ├── Makefile                   ← сборочный Makefile
-    │   ├── mplc_lib_so/               ← SDK .so (скопировать с контроллера)
-    │   └── mplc_protocol_fast_modbus.so  ← результат сборки
-    └── examples/
-        └── mplc_protocol_fast_modbus/ ← ИСХОДНИКИ ДРАЙВЕРА
-            ├── fmb_defs.h             ← константы протокола (subcommands, types, prio)
-            ├── fmb_transport.h/.cpp   ← RS-485: open/close/send/recv, CRC-16, t3.5
-            ├── fmb_frames.h/.cpp      ← builder/parser фреймов (scan, event, RTU)
-            ├── fmb_event_filter.h     ← антиспам: deadband, min_interval, burst
-            ├── fast_modbus_channel.h/.cpp  ← канал MS4 ↔ регистр Modbus
-            ├── fast_modbus_module.h/.cpp   ← устройство (slave) на шине
-            ├── fast_modbus_protocol.h/.cpp ← главный класс протокола
-            ├── mplc_fast_modbus.cpp   ← регистрация в MS4, объявление свойств
-            └── dllmain.cpp            ← точка входа SO
+├── API/                               ← локальный SDK MasterSCADA 4D (не в git)
+│   ├── include/                       ← скопировать с ПК / из установки MS4
+│   └── lib/
+│
+├── docs/                              ← анализ протокола и инструкции
+└── .github/workflows/build.yml
 ```
+
+> **Важно:** репозиторий [PCA9536-driver-for-MasterPLC](https://github.com/CYNTRON-git/PCA9536-driver-for-MasterPLC) — отдельный проект (драйвер GPIO PCA9536). К нему этот репозиторий **не привязан**. SDK `API/` кладётся локально из установки MasterSCADA 4D (см. `docs/BUILD_INSTRUCTIONS.md`).
 
 ---
 
@@ -362,17 +356,20 @@ ACK     : [addr] 46 18 01 00 CRC CRC                                          (7
 ### Быстрый старт (WSL / Linux)
 
 ```bash
-# 1. Клонировать с подмодулями
-git clone --recurse-submodules <repo_url>
+# 1. Клонировать репозиторий
+git clone https://github.com/CYNTRON-git/fast_modbus_MasterSCADA4D_driver.git
+cd fast_modbus_MasterSCADA4D_driver
 
-# 2. Установить кросс-компилятор (Ubuntu)
+# 2. Положить SDK MasterSCADA 4D в API/ (см. docs/BUILD_INSTRUCTIONS.md)
+
+# 3. Установить кросс-компилятор (Ubuntu)
 sudo apt install gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf make
 
-# 3. Скопировать SDK .so с контроллера
+# 4. Скопировать SDK .so с контроллера
 scp root@<controller_ip>:/opt/mplc4/{masterplc.so,mplcshare.so,mplc_archive.so,opcua.so,liblua.so,mplc_events.so} \
-    API/platform/linux/api/mplc_lib_so/
+    platform/linux/api/mplc_lib_so/
 
-# 4. Собрать
+# 5. Собрать
 ./build.sh linux-armv7hf
 ```
 
@@ -387,7 +384,7 @@ scp root@<controller_ip>:/opt/mplc4/{masterplc.so,mplcshare.so,mplc_archive.so,o
 ### Ручная сборка (без build.sh)
 
 ```bash
-cd API/platform/linux/api
+cd platform/linux/api
 CXX=arm-linux-gnueabihf-g++ \
 CC=arm-linux-gnueabihf-gcc \
 MPLCLIBS=$(pwd)/mplc_lib_so \
@@ -396,7 +393,7 @@ DEPs="mplc_lib_so/masterplc.so mplc_lib_so/mplc_archive.so mplc_lib_so/mplcshare
 make -j$(nproc) mplc_protocol_fast_modbus
 ```
 
-**Результат:** `API/platform/linux/api/mplc_protocol_fast_modbus.so`  
+**Результат:** `platform/linux/api/mplc_protocol_fast_modbus.so`  
 **Проверка:** `file mplc_protocol_fast_modbus.so` → `ELF 32-bit LSB shared object, ARM, EABI5`
 
 ---
@@ -405,7 +402,7 @@ make -j$(nproc) mplc_protocol_fast_modbus
 
 ```bash
 # Скопировать .so на контроллер
-scp API/platform/linux/api/mplc_protocol_fast_modbus.so \
+scp platform/linux/api/mplc_protocol_fast_modbus.so \
     root@<controller_ip>:/opt/mplc4/
 
 # Перезапустить службу
@@ -434,7 +431,7 @@ ssh root@<controller_ip> "journalctl -u mplc4 -n 30 | grep -i fast"
 - Ловит ошибки компиляции в любом коммите без доступа к закрытому SDK
 - Запускается при любом push/PR
 
-**Триггеры:** изменения в `API/examples/mplc_protocol_fast_modbus/**`, `API/include/**`, `build.sh`, `.github/workflows/build.yml`
+**Триггеры:** изменения в `mplc_protocol_fast_modbus/**`, `platform/linux/api/Makefile`, `build.sh`, `.github/workflows/build.yml`
 
 ---
 
@@ -477,20 +474,18 @@ sudo apt install gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
 ### SDK библиотеки не найдены
 
 ```
-ERROR: SDK libraries missing in API/platform/linux/api/mplc_lib_so/
+ERROR: SDK libraries missing in platform/linux/api/mplc_lib_so/
 ```
 
 Скопировать 6 файлов `.so` с работающего контроллера из `/opt/mplc4/`:
 ```bash
 scp root@<ip>:/opt/mplc4/{masterplc,mplcshare,mplc_archive,opcua,liblua,mplc_events}.so \
-    API/platform/linux/api/mplc_lib_so/
+    platform/linux/api/mplc_lib_so/
 ```
 
-### Ошибка `index file smaller than expected` (git)
+### Заголовки SDK не найдены при сборке
 
-```bash
-rm -f API/.git/index && cd API && git reset HEAD
-```
+Скопировать каталог `API` из установки MasterSCADA 4D в корень проекта (`API/include`, `API/lib`). Подробно — `docs/BUILD_INSTRUCTIONS.md`.
 
 ---
 
@@ -498,9 +493,7 @@ rm -f API/.git/index && cd API && git reset HEAD
 
 - [MasterSCADA 4D — документация по созданию протоколов](https://support.mps-soft.ru/Help-web/index.html)
 - [Wiren Board Fast Modbus — спецификация протокола](https://github.com/wirenboard/wb-modbus-ext-scanner/blob/main/docs/protocol.ru.md)
-- [MR-02m firmware (slave reference)](https://github.com/CYNTRON-git/MR-02m)
-- [MR-02m-flasher (master reference)](https://github.com/CYNTRON-git/MR-02m-flasher)
-- [PCA9536 driver example (API submodule origin)](https://github.com/CYNTRON-git/PCA9536-driver-for-MasterPLC)
+- [Репозиторий драйвера](https://github.com/CYNTRON-git/fast_modbus_MasterSCADA4D_driver)
 
 ---
 

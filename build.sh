@@ -6,7 +6,8 @@
 #
 # Prerequisites:
 #   • arm-linux-gnueabihf-g++ (Ubuntu: sudo apt install gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf)
-#   • SDK .so files in API/platform/linux/api/mplc_lib_so/
+#   • MasterSCADA API headers in API/ (see docs/BUILD_INSTRUCTIONS.md)
+#   • SDK .so files in platform/linux/api/mplc_lib_so/
 #     (copy from /opt/mplc4/ on the target controller, or see BUILD_INSTRUCTIONS.md)
 #   • GNU make
 
@@ -14,7 +15,7 @@ set -euo pipefail
 
 PLATFORM="${1:-linux-armv7hf}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR="${SCRIPT_DIR}/API/platform/linux/api"
+BUILD_DIR="${SCRIPT_DIR}/platform/linux/api"
 TARGET="mplc_protocol_fast_modbus"
 
 # ---- Select toolchain ----

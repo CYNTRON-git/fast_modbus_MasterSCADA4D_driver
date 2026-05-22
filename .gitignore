@@ -1,6 +1,12 @@
+# Local MasterSCADA 4D SDK (not in git — copy from product install)
+/API/*
+!/API/.gitkeep
+
 # Build artifacts
-API/platform/linux/api/.obj/
-API/platform/linux/api/out/
-API/platform/linux/api/*.so
-API/platform/linux/api/*.map
-API/platform/linux/api/log.txt
+/platform/linux/api/.obj/
+/platform/linux/api/out/
+/platform/linux/api/*.so
+/platform/linux/api/*.map
+/platform/linux/api/log.txt
+/platform/linux/api/mplc_lib_so/*
+!/platform/linux/api/mplc_lib_so/.gitkeep
