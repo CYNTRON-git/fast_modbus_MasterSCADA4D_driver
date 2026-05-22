@@ -1,6 +1,6 @@
-# Local MasterSCADA 4D SDK (not in git — copy from product install)
-/API/*
-!/API/.gitkeep
+# Local SDK and project docs (not in git)
+API/
+docs/
 
 # Build artifacts
 /platform/linux/api/.obj/
