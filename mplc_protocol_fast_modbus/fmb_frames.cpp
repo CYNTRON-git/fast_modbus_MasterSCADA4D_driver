@@ -1,284 +1,145 @@
 #include "fmb_frames.h"
 #include "fmb_transport.h"
+#include <cmath>
 #include <cstring>
-
+#include <limits>
 namespace fmb {
-
-// ---- Private helpers ----
-
-static void push_u16be(std::vector<uint8_t>& v, uint16_t val) {
-    v.push_back(static_cast<uint8_t>(val >> 8));
-    v.push_back(static_cast<uint8_t>(val & 0xFF));
+static void u16(Frame& f,uint16_t v){f.push_back(uint8_t(v>>8));f.push_back(uint8_t(v));}
+static void u32(Frame& f,uint32_t v){u16(f,uint16_t(v>>16));u16(f,uint16_t(v));}
+static uint16_t r16(const uint8_t*p){return uint16_t((uint16_t(p[0])<<8)|p[1]);}
+static uint32_t r32(const uint8_t*p){return (uint32_t(r16(p))<<16)|r16(p+2);}
+static Frame seal(Frame f){FmbTransport::append_crc(f);return f;}
+Frame build_read_regs(uint8_t a,uint8_t fc,uint16_t r,uint16_t n){
+    if(a<1||a>247||fc<1||fc>4||!n||n>((fc<3)?2000:125)||uint32_t(r)+n>65536)return {};
+    Frame f{a,fc};u16(f,r);u16(f,n);return seal(f);
 }
-static void push_u32be(std::vector<uint8_t>& v, uint32_t val) {
-    v.push_back(static_cast<uint8_t>((val >> 24) & 0xFF));
-    v.push_back(static_cast<uint8_t>((val >> 16) & 0xFF));
-    v.push_back(static_cast<uint8_t>((val >>  8) & 0xFF));
-    v.push_back(static_cast<uint8_t>( val        & 0xFF));
+Frame build_write_reg(uint8_t a,uint16_t r,uint16_t v){Frame f{a,6};u16(f,r);u16(f,v);return seal(f);}
+Frame build_write_coil(uint8_t a,uint16_t r,bool v){Frame f{a,5};u16(f,r);u16(f,v?0xFF00:0);return seal(f);}
+Frame build_write_regs(uint8_t a,uint16_t r,const uint16_t*v,uint8_t n){
+    if(a<1||a>247||!n||n>123||uint32_t(r)+n>65536||!v)return {};
+    Frame f{a,16};u16(f,r);u16(f,n);f.push_back(uint8_t(n*2));for(unsigned i=0;i<n;++i)u16(f,v[i]);return seal(f);
 }
-static uint16_t read_u16be(const uint8_t* p) {
-    return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | p[1]);
+Frame build_scan_start(){return seal({253,70,1});}
+Frame build_scan_next(){return seal({253,70,2});}
+Frame build_event_request(uint8_t m,uint8_t n,uint8_t a,uint8_t f){return seal({253,70,16,m,uint8_t(n>248?248:n),a,f});}
+Frame build_event_config(uint8_t a,uint8_t t,uint16_t r,uint8_t n,uint8_t p){
+    if(a<1||a>247||(t>3&&t!=15)||!n||n>246||p>2||uint32_t(r)+n>65536)return {};
+    Frame f{a,70,24,uint8_t(4+n),uint8_t(t==15?15:t+1)};u16(f,r);f.push_back(n);
+    // One channel = one value; subsequent words have no separate subscription.
+    for(unsigned i=0;i<n;++i)f.push_back(i?0:p);
+    return seal(f);
 }
-static uint32_t read_u32be(const uint8_t* p) {
-    return (static_cast<uint32_t>(p[0]) << 24)
-         | (static_cast<uint32_t>(p[1]) << 16)
-         | (static_cast<uint32_t>(p[2]) <<  8)
-         |  static_cast<uint32_t>(p[3]);
+Frame build_by_serial_request(uint32_t s,const Frame& p){
+    if(!s||p.empty()||p.size()>247)return {};
+    Frame f{253,70,8};u32(f,s);f.insert(f.end(),p.begin(),p.end());return seal(f);
 }
-
-// ============================================================
-//  Standard Modbus RTU builders
-// ============================================================
-
-std::vector<uint8_t> build_read_regs(uint8_t addr, uint8_t fc, uint16_t reg, uint16_t count)
-{
-    std::vector<uint8_t> f;
-    f.reserve(8);
-    f.push_back(addr);
-    f.push_back(fc);
-    push_u16be(f, reg);
-    push_u16be(f, count);
-    FmbTransport::append_crc(f);
-    return f;
+bool unwrap_serial(const Frame& f,uint32_t s,uint8_t a,Frame& inner){
+    inner.clear();if(f.size()<10||f.size()>256||f[0]!=253||f[1]!=70||f[2]!=9||r32(f.data()+3)!=s||!FmbTransport::check_crc(f.data(),f.size()))return false;
+    inner.push_back(a);inner.insert(inner.end(),f.begin()+7,f.end()-2);FmbTransport::append_crc(inner);return true;
 }
-
-std::vector<uint8_t> build_write_reg(uint8_t addr, uint16_t reg, uint16_t value)
-{
-    std::vector<uint8_t> f;
-    f.push_back(addr);
-    f.push_back(MB_FC_WRITE_REGISTER);
-    push_u16be(f, reg);
-    push_u16be(f, value);
-    FmbTransport::append_crc(f);
-    return f;
+bool parse_scan_response(const uint8_t*f,size_t n,FmbScanItem& out){
+    if(n!=10||f[0]!=253||(f[1]!=70&&f[1]!=96)||f[2]!=3||f[7]<1||f[7]>247||!FmbTransport::check_crc(f,n))return false;
+    out.serial=r32(f+3);out.modbus_addr=f[7];return true;
 }
-
-std::vector<uint8_t> build_write_regs(uint8_t addr, uint16_t reg,
-                                       const uint16_t* values, uint8_t count)
-{
-    std::vector<uint8_t> f;
-    f.push_back(addr);
-    f.push_back(MB_FC_WRITE_REGS);
-    push_u16be(f, reg);
-    push_u16be(f, static_cast<uint16_t>(count));
-    f.push_back(static_cast<uint8_t>(count * 2u)); // byte count
-    for (uint8_t i = 0; i < count; ++i) push_u16be(f, values[i]);
-    FmbTransport::append_crc(f);
-    return f;
-}
-
-std::vector<uint8_t> build_write_coil(uint8_t addr, uint16_t reg, bool value)
-{
-    std::vector<uint8_t> f;
-    f.push_back(addr);
-    f.push_back(MB_FC_WRITE_COIL);
-    push_u16be(f, reg);
-    push_u16be(f, value ? 0xFF00u : 0x0000u);
-    FmbTransport::append_crc(f);
-    return f;
-}
-
-// ============================================================
-//  Standard Modbus RTU parsers
-// ============================================================
-
-std::vector<uint16_t> parse_read_response(const uint8_t* frame, size_t len)
-{
-    std::vector<uint16_t> result;
-    if (len < 5) return result;
-    if (!FmbTransport::check_crc(frame, len)) return result;
-    uint8_t fc = frame[1];
-    if (fc & 0x80) return result; // exception response
-
-    uint8_t byte_count = frame[2];
-    if (static_cast<size_t>(byte_count) + 5u > len) return result;
-
-    const uint8_t* data = frame + 3;
-    if (fc == MB_FC_READ_COILS || fc == MB_FC_READ_DISCRETE) {
-        for (uint8_t b = 0; b < byte_count; ++b)
-            for (int bit = 0; bit < 8; ++bit)
-                result.push_back((data[b] >> bit) & 1u);
-    } else {
-        // FC03/FC04: BE uint16 pairs; caller applies int16 cast if needed
-        for (uint8_t i = 0; i + 1 < byte_count; i += 2)
-            result.push_back(read_u16be(data + i));
+bool scan_finished(const uint8_t*f,size_t n){return n==5&&f[0]==253&&(f[1]==70||f[1]==96)&&f[2]==4&&FmbTransport::check_crc(f,n);}
+int parse_event_response(const uint8_t*f,size_t n,std::vector<FmbEvent>& out,uint8_t& as,uint8_t& af){
+    out.clear();as=af=0;
+    if(n<5||n>256||f[1]!=70||!FmbTransport::check_crc(f,n))return -1;
+    if(f[2]==18)return n==5&&f[0]==253?0:-1;
+    if(f[2]!=17||n<8||f[0]<1||f[0]>247||size_t(f[5])+8!=n)return -1;
+    std::vector<FmbEvent> parsed;
+    size_t p=6,end=n-2;
+    while(p<end){
+        if(end-p<4)return -1;
+        FmbEvent e{};e.slave_id=f[0];e.payload_len=f[p];const auto wire=f[p+1];e.reg_addr=r16(f+p+2);p+=4;
+        if(e.payload_len>end-p)return -1;
+        e.type=(wire>=1&&wire<=4)?uint8_t(wire-1):(wire==15?15:255);
+        if((e.type<=1&&(e.payload_len!=1||f[p]>1))||
+           ((e.type==2||e.type==3)&&e.payload_len!=2&&e.payload_len!=4)||
+           (e.type==15&&(e.payload_len!=0||e.reg_addr!=0)))return -1;
+        std::memcpy(e.payload,f+p,e.payload_len);p+=e.payload_len;parsed.push_back(e);
     }
-    return result;
+    // N is all pending events, not the number of entries in this payload.
+    if(parsed.size()>f[4])return -1;
+    out.swap(parsed);as=f[0];af=f[3];return 1;
 }
-
-// ============================================================
-//  Fast Modbus WB-extension builders
-//  Reference: MR-02m fast_mb.c + MR-02m-flasher modbus_rtu.py
-// ============================================================
-
-// All broadcast scan frames: FD 46 [sub] CRC_L CRC_H (5 bytes)
-static std::vector<uint8_t> build_broadcast3(uint8_t sub)
-{
-    std::vector<uint8_t> f;
-    f.push_back(FMB_BROADCAST_ADDR);
-    f.push_back(FMB_FUNC);
-    f.push_back(sub);
-    FmbTransport::append_crc(f);
-    return f;
+bool exception(const Frame&f,uint8_t a,uint8_t fc,uint8_t& code){
+    if(f.size()!=5||f[0]!=a||f[1]!=(fc|128)||!FmbTransport::check_crc(f.data(),f.size()))return false;
+    code=f[2];return true;
 }
-
-std::vector<uint8_t> build_scan_start() { return build_broadcast3(FMB_SUB_SCAN_START); }
-std::vector<uint8_t> build_scan_next()  { return build_broadcast3(FMB_SUB_SCAN_NEXT);  }
-std::vector<uint8_t> build_scan_end()   { return build_broadcast3(FMB_SUB_SCAN_END);   }
-
-std::vector<uint8_t> build_event_request(uint8_t min_slave_id, uint8_t max_data_len,
-                                          uint8_t ack_slave, uint8_t ack_flag)
-{
-    // FD 46 10 [min_slave] [max_data_len] [ack_slave] [ack_flag] CRC_L CRC_H тАФ 9 bytes
-    std::vector<uint8_t> f;
-    f.push_back(FMB_BROADCAST_ADDR);
-    f.push_back(FMB_FUNC);
-    f.push_back(FMB_SUB_EVT_REQUEST);
-    f.push_back(min_slave_id);
-    f.push_back(max_data_len);
-    f.push_back(ack_slave);
-    f.push_back(ack_flag);
-    FmbTransport::append_crc(f);
-    return f;
+std::vector<uint16_t> parse_read_response(const uint8_t*f,size_t n){
+    std::vector<uint16_t> out;
+    if(n<5||n>256||f[0]<1||f[0]>247||f[1]<1||f[1]>4||size_t(f[2])+5!=n||!FmbTransport::check_crc(f,n))return out;
+    if(f[1]<3){for(size_t i=0;i<f[2];++i)for(unsigned b=0;b<8;++b)out.push_back((f[3+i]>>b)&1);}
+    else {if(f[2]%2)return out;for(size_t i=0;i<f[2];i+=2)out.push_back(r16(f+3+i));}
+    return out;
 }
-
-std::vector<uint8_t> build_event_config(uint8_t slave_addr, uint8_t type,
-                                         uint16_t reg_addr, uint8_t count,
-                                         uint8_t prio)
-{
-    // [addr] 46 18 05 [type] [reg_h] [reg_l] [count] [prio] CRC_L CRC_H тАФ 11 bytes
-    // data_len byte (0x05) = type(1) + reg(2) + count(1) + prio(1) = 5
-    std::vector<uint8_t> f;
-    f.push_back(slave_addr);
-    f.push_back(FMB_FUNC);
-    f.push_back(FMB_SUB_EVT_CONFIG);
-    f.push_back(0x05);          // data length following
-    f.push_back(type);
-    push_u16be(f, reg_addr);
-    f.push_back(count);         // 1 byte тАФ NOT 2!
-    f.push_back(prio);
-    FmbTransport::append_crc(f);
-    return f;
+bool validate_read(const Frame&f,uint8_t a,uint8_t fc,uint16_t n,std::vector<uint16_t>& out){
+    out.clear();if(f.size()<5||f[0]!=a||f[1]!=fc||!n)return false;
+    size_t bytes=fc<3?(n+7)/8:n*2;if(f[2]!=bytes)return false;
+    auto v=parse_read_response(f.data(),f.size());if(v.size()<n)return false;v.resize(n);out.swap(v);return true;
 }
-
-std::vector<uint8_t> build_by_serial_request(uint32_t serial,
-                                               const std::vector<uint8_t>& inner_pdu)
-{
-    // FD 46 08 [serial BE 4B] [inner_pdu] CRC
-    std::vector<uint8_t> f;
-    f.push_back(FMB_BROADCAST_ADDR);
-    f.push_back(FMB_FUNC);
-    f.push_back(FMB_SUB_BY_SER_REQ);
-    push_u32be(f, serial);
-    f.insert(f.end(), inner_pdu.begin(), inner_pdu.end());
-    FmbTransport::append_crc(f);
-    return f;
+bool validate_write(const Frame&q,const Frame&r){
+    if(q.size()<8||r.size()!=8||r[0]!=q[0]||r[1]!=q[1]||!FmbTransport::check_crc(r.data(),r.size()))return false;
+    return (q[1]==5||q[1]==6||q[1]==16||q[1]==15)&&std::memcmp(q.data(),r.data(),6)==0;
 }
-
-// ============================================================
-//  Fast Modbus parsers
-// ============================================================
-
-bool parse_scan_response(const uint8_t* frame, size_t len, FmbScanItem& out)
-{
-    // FD 46 03 [serial BE 4B] [mb_addr] CRC_L CRC_H тАФ 10 bytes
-    if (len < FMB_SCAN_FRAME_LEN) return false;
-    if (!FmbTransport::check_crc(frame, len)) return false;
-    if ((frame[1] != FMB_FUNC && frame[1] != FMB_FUNC_LEGACY)) return false;
-    if (frame[2] != FMB_SUB_SCAN_RSP) return false;
-
-    // frame[0] = 0xFD (broadcast); frame[3..6] = serial; frame[7] = modbus_addr
-    out.serial      = read_u32be(frame + 3);
-    out.modbus_addr = frame[7];
+int parse_config_response(const Frame&r,uint8_t a,uint8_t n){
+    size_t masks=(n+7)/8;
+    if(!n||r.size()!=masks+6||r[0]!=a||r[1]!=70||r[2]!=24||r[3]!=masks||!FmbTransport::check_crc(r.data(),r.size()))return -1;
+    return (r[4]&1)?1:0;
+}
+size_t value_words(ValueType t){return unsigned(t)>=2?2:1;}
+bool decode_value(const uint8_t*b,size_t n,bool le,ValueType t,bool low,double& out){
+    if(unsigned(t)>4||n!=2*value_words(t))return false;
+    uint32_t u=0;
+    if(le){for(size_t i=0;i<n;++i)u|=uint32_t(b[i])<<(8*i);}
+    else {for(size_t i=0;i<n;++i)u=(u<<8)|b[i];if(n==4&&low)u=(u<<16)|(u>>16);}
+    switch(t){
+    case ValueType::U16:out=uint16_t(u);break;
+    case ValueType::I16:out=(u&0x8000)?double(u)-65536.0:double(u);break;
+    case ValueType::U32:out=u;break;
+    case ValueType::I32:out=(u&0x80000000)?double(u)-4294967296.0:double(u);break;
+    case ValueType::F32:{float v;std::memcpy(&v,&u,4);out=v;break;}
+    }
+    return std::isfinite(out);
+}
+bool encode_value(double v,ValueType t,bool low,std::vector<uint16_t>& out){
+    out.clear();if(!std::isfinite(v)||unsigned(t)>4)return false;
+    uint32_t u=0;
+    if(t==ValueType::F32){if(std::fabs(v)>std::numeric_limits<float>::max())return false;float f=float(v);std::memcpy(&u,&f,4);}
+    else {
+        v=std::round(v);double lo=0,hi=65535;
+        if(t==ValueType::I16){lo=-32768;hi=32767;}
+        if(t==ValueType::U32)hi=4294967295.0;
+        if(t==ValueType::I32){lo=-2147483648.0;hi=2147483647;}
+        if(v<lo||v>hi)return false;
+        u=v<0?uint32_t(int64_t(v)):uint32_t(v);
+    }
+    if(value_words(t)==1){out.push_back(uint16_t(u));}
+    else if(low){out.push_back(uint16_t(u));out.push_back(uint16_t(u>>16));}
+    else {out.push_back(uint16_t(u>>16));out.push_back(uint16_t(u));}
     return true;
 }
-
-int parse_event_response(const uint8_t* frame, size_t len,
-                          std::vector<FmbEvent>& events,
-                          uint8_t& out_ack_slave,
-                          uint8_t& out_ack_flag)
-{
-    if (len < 5) return -1;
-    if (!FmbTransport::check_crc(frame, len)) return -1;
-    if (frame[1] != FMB_FUNC && frame[1] != FMB_FUNC_LEGACY) return -1;
-
-    uint8_t sub = frame[2];
-
-    if (sub == FMB_SUB_EVT_NONE) {
-        // [slave_id] 46 12 [FLAG] CRC_L CRC_H тАФ 6 bytes
-        // Bus quiet; no confirmation needed.
-        return 0;
+int response_length(const uint8_t*b,size_t n){
+    if(n<2)return 0;
+    if(b[1]&128)return 5;
+    if(b[1]>=1&&b[1]<=4)return n<3?0:int(b[2])+5;
+    if(b[1]==5||b[1]==6||b[1]==15||b[1]==16)return 8;
+    if(b[1]!=70&&b[1]!=96)return -1;
+    if(n<3)return 0;
+    switch(b[2]){
+    case 3:return 10;
+    case 4:case 18:return 5;
+    case 17:return n<6?0:int(b[5])+8;
+    case 24:return n<4?0:int(b[3])+6;
+    case 9:{
+        if(n<8)return 0;uint8_t fc=b[7];
+        if(fc&128)return 11;
+        if(fc>=1&&fc<=4)return n<9?0:int(b[8])+11;
+        if(fc==5||fc==6||fc==15||fc==16)return 14;
+        return -1;
     }
-
-    if (sub != FMB_SUB_EVT_TRANSMIT) return -1;
-
-    // [slave_id] 46 11 [FLAG] [N] [DATA_LEN] [events ├Ч N] CRC_L CRC_H
-    if (len < 8) return -1;
-
-    uint8_t slave_id  = frame[0];
-    uint8_t flag      = frame[3];
-    uint8_t evt_count = frame[4];
-    uint8_t data_len  = frame[5];
-
-    out_ack_slave = slave_id;
-    out_ack_flag  = flag;
-
-    if (evt_count == 0) return 1; // empty batch (confirms previous reception)
-
-    // Format B (MR-02m >= 1.0.8.8): no PLEN prefix per event.
-    // Event layout: [TYPE:1] [REG_H:1] [REG_L:1] [VALUE:0/1/2 bytes]
-    // Payload size is determined by TYPE.
-    const uint8_t* p   = frame + 6;
-    const uint8_t* end = frame + 6 + data_len;
-    if (end > frame + len - 2) end = frame + len - 2; // guard: stay before CRC
-
-    events.reserve(evt_count);
-
-    for (uint8_t i = 0; i < evt_count && p + 3 <= end; ++i) {
-        FmbEvent ev{};
-        ev.slave_id = slave_id;
-        ev.type     = p[0];
-        ev.reg_addr = read_u16be(p + 1);
-        p += 3;
-
-        // Payload bytes determined by register type (no PLEN byte in Format B)
-        uint8_t plen;
-        switch (ev.type) {
-            case FMB_TYPE_COIL:
-            case FMB_TYPE_DISCRETE: plen = 1; break;
-            case FMB_TYPE_HOLDING:
-            case FMB_TYPE_INPUT:    plen = 2; break;
-            case FMB_TYPE_REBOOT:   plen = 0; break;
-            default:
-                // Unknown type: cannot determine size, stop parsing
-                goto end_parse;
-        }
-
-        if (p + plen > end) break;
-        ev.payload_len = plen;
-        if (plen > 0) ev.payload[0] = p[0];
-        if (plen > 1) ev.payload[1] = p[1];
-        p += plen;
-        events.push_back(ev);
-    }
-end_parse:;
-
-    return 1;
-}
-
-double fmb_event_to_double(const FmbEvent& ev)
-{
-    switch (ev.payload_len) {
-        case 0: return 0.0; // REBOOT
-        case 1: return static_cast<double>(ev.payload[0]); // COIL / DISCRETE (0 or 1)
-        case 2: {
-            // HOLDING / INPUT: big-endian; interpret as signed int16.
-            // Most MR-02m sensor registers are signed (temperature ├Ч10, etc.).
-            uint16_t u16 = (static_cast<uint16_t>(ev.payload[0]) << 8) | ev.payload[1];
-            return static_cast<double>(static_cast<int16_t>(u16));
-        }
-        default: return 0.0;
+    default:return -1;
     }
 }
-
-} // namespace fmb
+}

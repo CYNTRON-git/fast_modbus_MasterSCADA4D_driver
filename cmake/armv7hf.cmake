@@ -1,0 +1,13 @@
+# Standalone host/core cross compilation only. Full addin builds use build_arm_vendor.py.
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR arm)
+if(NOT DEFINED ENV{MPS_TOOLCHAIN_BIN})
+  message(FATAL_ERROR "Set MPS_TOOLCHAIN_BIN to the verified MPS GCC13.3.0 directory")
+endif()
+set(CMAKE_C_COMPILER "$ENV{MPS_TOOLCHAIN_BIN}/arm-mpssoft-linux-gnueabihf-gcc")
+set(CMAKE_CXX_COMPILER "$ENV{MPS_TOOLCHAIN_BIN}/arm-mpssoft-linux-gnueabihf-g++")
+set(CMAKE_CXX_FLAGS_INIT "-mcpu=cortex-a7 -mfloat-abi=hard -mfpu=neon-vfpv4")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)

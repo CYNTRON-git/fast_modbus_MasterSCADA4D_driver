@@ -1,311 +1,194 @@
 #include "fmb_transport.h"
+#include <chrono>
+#include <thread>
+#include <algorithm>
+#include <cerrno>
 #include <cstring>
-
 #ifdef _WIN32
-#  include <windows.h>
+#include <ws2tcpip.h>
 #else
-#  include <fcntl.h>
-#  include <unistd.h>
-#  include <errno.h>
-#  include <sys/select.h>
-#  include <sys/ioctl.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/file.h>
+#include <sys/ioctl.h>
+#include <arpa/inet.h>
 #endif
-
-// ---- CRC-16/MODBUS ----
-static const uint16_t s_crc16_table[256] = {
-    0x0000,0xC0C1,0xC181,0x0140,0xC301,0x03C0,0x0280,0xC241,
-    0xC601,0x06C0,0x0780,0xC741,0x0500,0xC5C1,0xC481,0x0440,
-    0xCC01,0x0CC0,0x0D80,0xCD41,0x0F00,0xCFC1,0xCE81,0x0E40,
-    0x0A00,0xCAC1,0xCB81,0x0B40,0xC901,0x09C0,0x0880,0xC841,
-    0xD801,0x18C0,0x1980,0xD941,0x1B00,0xDBC1,0xDA81,0x1A40,
-    0x1E00,0xDEC1,0xDF81,0x1F40,0xDD01,0x1DC0,0x1C80,0xDC41,
-    0x1400,0xD4C1,0xD581,0x1540,0xD701,0x17C0,0x1680,0xD641,
-    0xD201,0x12C0,0x1380,0xD341,0x1100,0xD1C1,0xD081,0x1040,
-    0xF001,0x30C0,0x3180,0xF141,0x3300,0xF3C1,0xF281,0x3240,
-    0x3600,0xF6C1,0xF781,0x3740,0xF501,0x35C0,0x3480,0xF441,
-    0x3C00,0xFCC1,0xFD81,0x3D40,0xFF01,0x3FC0,0x3E80,0xFE41,
-    0xFA01,0x3AC0,0x3B80,0xFB41,0x3900,0xF9C1,0xF881,0x3840,
-    0x2800,0xE8C1,0xE981,0x2940,0xEB01,0x2BC0,0x2A80,0xEA41,
-    0xEE01,0x2EC0,0x2F80,0xEF41,0x2D00,0xEDC1,0xEC81,0x2C40,
-    0xE401,0x24C0,0x2580,0xE541,0x2700,0xE7C1,0xE681,0x2640,
-    0x2200,0xE2C1,0xE381,0x2340,0xE101,0x21C0,0x2080,0xE041,
-    0xA001,0x60C0,0x6180,0xA141,0x6300,0xA3C1,0xA281,0x6240,
-    0x6600,0xA6C1,0xA781,0x6740,0xA501,0x65C0,0x6480,0xA441,
-    0x6C00,0xACC1,0xAD81,0x6D40,0xAF01,0x6FC0,0x6E80,0xAE41,
-    0xAA01,0x6AC0,0x6B80,0xAB41,0x6900,0xA9C1,0xA881,0x6840,
-    0x7800,0xB8C1,0xB981,0x7940,0xBB01,0x7BC0,0x7A80,0xBA41,
-    0xBE01,0x7EC0,0x7F80,0xBF41,0x7D00,0xBDC1,0xBC81,0x7C40,
-    0xB401,0x74C0,0x7580,0xB541,0x7700,0xB7C1,0xB681,0x7640,
-    0x7200,0xB2C1,0xB381,0x7340,0xB101,0x71C0,0x7080,0xB041,
-    0x5000,0x90C1,0x9181,0x5140,0x9301,0x53C0,0x5280,0x9241,
-    0x9601,0x56C0,0x5780,0x9741,0x5500,0x95C1,0x9481,0x5440,
-    0x9C01,0x5CC0,0x5D80,0x9D41,0x5F00,0x9FC1,0x9E81,0x5E40,
-    0x5A00,0x9AC1,0x9B81,0x5B40,0x9901,0x59C0,0x5880,0x9841,
-    0x8801,0x48C0,0x4980,0x8941,0x4B00,0x8BC1,0x8A81,0x4A40,
-    0x4E00,0x8EC1,0x8F81,0x4F40,0x8D01,0x4DC0,0x4C80,0x8C41,
-    0x4400,0x84C1,0x8581,0x4540,0x8701,0x47C0,0x4680,0x8641,
-    0x8201,0x42C0,0x4380,0x8341,0x4100,0x81C1,0x8081,0x4040,
-};
-
-uint16_t FmbTransport::crc16(const uint8_t* data, size_t len)
-{
-    uint16_t crc = 0xFFFF;
-    for (size_t i = 0; i < len; ++i)
-        crc = (crc >> 8) ^ s_crc16_table[(crc ^ data[i]) & 0xFF];
-    return crc;
+using Clock=std::chrono::steady_clock;
+uint16_t FmbTransport::crc16(const uint8_t*p,size_t n){
+    uint16_t c=65535;for(size_t i=0;i<n;++i){c^=p[i];for(unsigned b=0;b<8;++b)c=uint16_t((c>>1)^((c&1)?0xA001:0));}return c;
 }
-
-// ---- t3.5 helper ----
-static uint32_t calc_t35_us(int baud)
-{
-    // Modbus RTU: 3.5 char times, 1 char = 11 bits
-    // t3.5 [us] = (11 * 3.5 * 1e6) / baud = 38500000 / baud
-    // Minimum 1750 us (at 115200: ~3.8 char times rounded to 2 ms min)
-    uint32_t t = static_cast<uint32_t>(38500000u / static_cast<uint32_t>(baud > 0 ? baud : 9600));
-    return (t < 1750u) ? 1750u : t;
-}
-
+void FmbTransport::append_crc(fmb::Frame&f){auto c=crc16(f.data(),f.size());f.push_back(uint8_t(c));f.push_back(uint8_t(c>>8));}
+bool FmbTransport::check_crc(const uint8_t*p,size_t n){return n>=3&&crc16(p,n-2)==uint16_t(p[n-2]|(uint16_t(p[n-1])<<8));}
+void FmbTransport::sleep_ms(uint32_t n){std::this_thread::sleep_for(std::chrono::milliseconds(n));}
+void FmbTransport::wait_t35(){std::this_thread::sleep_for(std::chrono::microseconds(t35_us_)+std::chrono::milliseconds(extra_delay_ms));}
+bool FmbTransport::is_open()const{
 #ifdef _WIN32
-// ============================================================
-//  Windows implementation
-// ============================================================
-
-bool FmbTransport::open(const std::string& port, int baud, int parity,
-                        int stop_bits, int data_bits, int response_timeout_ms)
-{
-    close();
-    m_baud = baud;
-    m_response_timeout_ms = response_timeout_ms;
-    m_t35_us = calc_t35_us(baud);
-
-    std::string p = (port.rfind("\\\\.\\", 0) == 0) ? port : "\\\\.\\" + port;
-    m_handle = CreateFileA(p.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (m_handle == INVALID_HANDLE_VALUE) return false;
-
-    DCB dcb{};
-    dcb.DCBlength = sizeof(dcb);
-    if (!GetCommState(m_handle, &dcb)) { close(); return false; }
-
-    dcb.BaudRate = static_cast<DWORD>(baud);
-    dcb.ByteSize = static_cast<BYTE>(data_bits > 0 ? data_bits : 8);
-    dcb.StopBits = (stop_bits == 2) ? TWOSTOPBITS : ONESTOPBIT;
-    switch (parity) {
-        case 1: dcb.Parity = EVENPARITY; dcb.fParity = TRUE;  break;
-        case 2: dcb.Parity = ODDPARITY;  dcb.fParity = TRUE;  break;
-        default:dcb.Parity = NOPARITY;   dcb.fParity = FALSE; break;
-    }
-    dcb.fDtrControl    = DTR_CONTROL_DISABLE;
-    dcb.fRtsControl    = RTS_CONTROL_DISABLE;
-    dcb.fOutxCtsFlow   = FALSE;
-    dcb.fOutxDsrFlow   = FALSE;
-    dcb.fBinary        = TRUE;
-    dcb.fNull          = FALSE;
-    if (!SetCommState(m_handle, &dcb)) { close(); return false; }
-
-    COMMTIMEOUTS to{};
-    to.ReadIntervalTimeout         = 5;    // ms between chars
-    to.ReadTotalTimeoutMultiplier  = 2;
-    to.ReadTotalTimeoutConstant    = static_cast<DWORD>(response_timeout_ms);
-    to.WriteTotalTimeoutConstant   = 200;
-    to.WriteTotalTimeoutMultiplier = 0;
-    SetCommTimeouts(m_handle, &to);
-
-    PurgeComm(m_handle, PURGE_RXCLEAR | PURGE_TXCLEAR);
-    return true;
-}
-
-void FmbTransport::close()
-{
-    if (m_handle != INVALID_HANDLE_VALUE) {
-        CloseHandle(m_handle);
-        m_handle = INVALID_HANDLE_VALUE;
-    }
-}
-
-bool FmbTransport::is_open() const { return m_handle != INVALID_HANDLE_VALUE; }
-
-bool FmbTransport::send(const uint8_t* data, size_t len)
-{
-    if (!is_open()) return false;
-    DWORD written = 0;
-    return WriteFile(m_handle, data, static_cast<DWORD>(len), &written, nullptr)
-           && written == static_cast<DWORD>(len);
-}
-
-int FmbTransport::recv(uint8_t* buf, size_t max_bytes, uint32_t timeout_ms)
-{
-    if (!is_open()) return -1;
-    COMMTIMEOUTS to{};
-    to.ReadIntervalTimeout         = 5;
-    to.ReadTotalTimeoutMultiplier  = 2;
-    to.ReadTotalTimeoutConstant    = static_cast<DWORD>(timeout_ms);
-    SetCommTimeouts(m_handle, &to);
-
-    DWORD got = 0;
-    if (!ReadFile(m_handle, buf, static_cast<DWORD>(max_bytes), &got, nullptr))
-        return -1;
-    return static_cast<int>(got);
-}
-
-void FmbTransport::flush_rx()
-{
-    if (is_open()) PurgeComm(m_handle, PURGE_RXCLEAR);
-}
-
-void FmbTransport::wait_t35()
-{
-    // Windows: Sleep in ms (round up)
-    DWORD ms = (m_t35_us + 999u) / 1000u;
-    Sleep(ms ? ms : 1);
-}
-
+    return tcp_?socket_!=INVALID_SOCKET:handle_!=INVALID_HANDLE_VALUE;
 #else
-// ============================================================
-//  Linux / POSIX implementation
-// ============================================================
-#include <time.h>
-
-static speed_t to_speed(int baud)
-{
-    switch (baud) {
-        case 1200:   return B1200;
-        case 2400:   return B2400;
-        case 4800:   return B4800;
-        case 9600:   return B9600;
-        case 19200:  return B19200;
-        case 38400:  return B38400;
-        case 57600:  return B57600;
-        case 115200: return B115200;
+    return fd_>=0;
+#endif
+}
+void FmbTransport::close(){
+#ifdef _WIN32
+    if(socket_!=INVALID_SOCKET){closesocket(socket_);socket_=INVALID_SOCKET;}
+    if(handle_!=INVALID_HANDLE_VALUE){CloseHandle(handle_);handle_=INVALID_HANDLE_VALUE;}
+#else
+    if(fd_>=0){if(!tcp_){
+#ifdef TIOCNXCL
+        if(exclusive_owned_)ioctl(fd_,TIOCNXCL);
+#endif
+    }::close(fd_);fd_=-1;exclusive_owned_=false;}
+#endif
+}
+bool FmbTransport::open_tcp(const std::string& text,uint32_t ms){
+    auto colon=text.rfind(':');if(colon==std::string::npos)return false;
+    std::string ip=text.substr(0,colon),port=text.substr(colon+1);
+    if(port.empty()||port.size()>5||port.find_first_not_of("0123456789")!=std::string::npos)return false;
+    unsigned pn=unsigned(std::stoul(port));if(!pn||pn>65535)return false;
+    sockaddr_in address{};address.sin_family=AF_INET;address.sin_port=htons(uint16_t(pn));
+#ifdef _WIN32
+    static const bool initialized=[](){WSADATA w{};return WSAStartup(MAKEWORD(2,2),&w)==0;}();
+    if(!initialized||InetPtonA(AF_INET,ip.c_str(),&address.sin_addr)!=1)return false;
+    socket_=::socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(socket_==INVALID_SOCKET)return false;
+    u_long nb=1;ioctlsocket(socket_,FIONBIO,&nb);
+    int r=::connect(socket_,reinterpret_cast<sockaddr*>(&address),sizeof(address));
+    if(r==SOCKET_ERROR&&WSAGetLastError()!=WSAEWOULDBLOCK){close();return false;}
+    auto fd=socket_;
+#else
+    if(inet_pton(AF_INET,ip.c_str(),&address.sin_addr)!=1)return false;
+    fd_=::socket(AF_INET,SOCK_STREAM,0);if(fd_<0)return false;
+    if(fd_>=FD_SETSIZE){close();return false;}
+    fcntl(fd_,F_SETFL,fcntl(fd_,F_GETFL,0)|O_NONBLOCK);
+    int r=::connect(fd_,reinterpret_cast<sockaddr*>(&address),sizeof(address));
+    if(r<0&&errno!=EINPROGRESS){close();return false;}auto fd=fd_;
+#endif
+    fd_set w;FD_ZERO(&w);FD_SET(fd,&w);timeval tv{long(ms/1000),long(ms%1000*1000)};
+    int selected=select(int(fd)+1,nullptr,&w,nullptr,&tv);
+    int err=0;
+#ifdef _WIN32
+    int len=sizeof(err);getsockopt(fd,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&err),&len);
+#else
+    socklen_t len=sizeof(err);getsockopt(fd,SOL_SOCKET,SO_ERROR,&err,&len);
+#endif
+    if(selected<=0||err){close();return false;}return true;
+}
+bool FmbTransport::open(const std::string& name,int baud,int parity,int stops,int bits,int timeout){
+    close();
+    if(timeout<10||timeout>5000||baud<1200||baud>230400||parity<0||parity>2||
+        (stops!=1&&stops!=2)||(bits!=7&&bits!=8))return false;
+    timeout_ms_=uint32_t(timeout);t35_us_=std::max(1750u,38500000u/uint32_t(baud));
+    tcp_=name.rfind("tcp://",0)==0;
+    if(tcp_)return open_tcp(name.substr(6),timeout_ms_);
+#ifdef _WIN32
+    std::string port=name.rfind("\\\\.\\",0)==0?name:"\\\\.\\"+name;
+    handle_=CreateFileA(port.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(handle_==INVALID_HANDLE_VALUE)return false;
+    DCB d{};d.DCBlength=sizeof(d);if(!GetCommState(handle_,&d)){close();return false;}
+    d.BaudRate=DWORD(baud);d.ByteSize=BYTE(bits);d.StopBits=stops==2?TWOSTOPBITS:ONESTOPBIT;
+    d.Parity=parity==1?EVENPARITY:parity==2?ODDPARITY:NOPARITY;d.fParity=parity!=0;
+    d.fDtrControl=DTR_CONTROL_DISABLE;d.fRtsControl=RTS_CONTROL_DISABLE;d.fOutxCtsFlow=FALSE;d.fOutxDsrFlow=FALSE;
+    d.fOutX=FALSE;d.fInX=FALSE;d.fBinary=TRUE;d.fNull=FALSE;d.fAbortOnError=FALSE;
+    if(!SetCommState(handle_,&d)){close();return false;}
+    COMMTIMEOUTS t{};t.ReadIntervalTimeout=MAXDWORD;t.ReadTotalTimeoutConstant=0;
+    t.WriteTotalTimeoutConstant=timeout_ms_;if(!SetCommTimeouts(handle_,&t)){close();return false;}
+    PurgeComm(handle_,PURGE_RXCLEAR|PURGE_TXCLEAR);return true;
+#else
+    fd_=::open(name.c_str(),O_RDWR|O_NOCTTY|O_NONBLOCK);if(fd_<0)return false;
+    if(fd_>=FD_SETSIZE){close();return false;}
+    if(flock(fd_,LOCK_EX|LOCK_NB)<0){close();return false;}
+#ifdef TIOCEXCL
+    if(ioctl(fd_,TIOCEXCL)<0){close();return false;}
+    exclusive_owned_=true;
+#endif
+    speed_t speed;
+    switch(baud){
+    case 1200:speed=B1200;break;case 2400:speed=B2400;break;case 4800:speed=B4800;break;
+    case 9600:speed=B9600;break;case 19200:speed=B19200;break;case 38400:speed=B38400;break;
+    case 57600:speed=B57600;break;case 115200:speed=B115200;break;
 #ifdef B230400
-        case 230400: return B230400;
+    case 230400:speed=B230400;break;
 #endif
-        default:     return B9600;
+    default:close();return false;
     }
+    termios t{};if(tcgetattr(fd_,&t)<0){close();return false;}cfmakeraw(&t);
+    cfsetispeed(&t,speed);cfsetospeed(&t,speed);t.c_cflag|=CLOCAL|CREAD;t.c_cflag&=~(CSIZE|PARENB|PARODD|CSTOPB);
+#ifdef CRTSCTS
+    t.c_cflag&=~CRTSCTS;
+#endif
+    t.c_cflag|=bits==7?CS7:CS8;
+    if(stops==2)t.c_cflag|=CSTOPB;
+    if(parity){t.c_cflag|=PARENB;if(parity==2)t.c_cflag|=PARODD;t.c_iflag|=INPCK;}
+    t.c_cc[VMIN]=0;t.c_cc[VTIME]=0;
+    if(tcsetattr(fd_,TCSANOW,&t)<0){close();return false;}tcflush(fd_,TCIOFLUSH);return true;
+#endif
 }
-
-bool FmbTransport::open(const std::string& port, int baud, int parity,
-                        int stop_bits, int data_bits, int response_timeout_ms)
-{
-    close();
-    m_baud = baud;
-    m_response_timeout_ms = response_timeout_ms;
-    m_t35_us = calc_t35_us(baud);
-
-    m_fd = ::open(port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (m_fd < 0) return false;
-
-    // Set blocking mode
-    int flags = fcntl(m_fd, F_GETFL, 0);
-    fcntl(m_fd, F_SETFL, flags & ~O_NONBLOCK);
-
-    struct termios tio{};
-    tcgetattr(m_fd, &tio);
-    cfmakeraw(&tio);
-
-    speed_t spd = to_speed(baud);
-    cfsetispeed(&tio, spd);
-    cfsetospeed(&tio, spd);
-
-    tio.c_cflag |= CLOCAL | CREAD;
-    tio.c_cflag &= ~CSIZE;
-    switch (data_bits) {
-        case 7: tio.c_cflag |= CS7; break;
-        default: tio.c_cflag |= CS8; break;
-    }
-    if (stop_bits == 2) tio.c_cflag |= CSTOPB;
-    else tio.c_cflag &= ~CSTOPB;
-
-    tio.c_cflag &= ~PARENB;
-    tio.c_iflag &= ~(INPCK | ISTRIP);
-    if (parity == 1) { // even
-        tio.c_cflag |= PARENB;
-        tio.c_cflag &= ~PARODD;
-        tio.c_iflag |= INPCK;
-    } else if (parity == 2) { // odd
-        tio.c_cflag |= PARENB | PARODD;
-        tio.c_iflag |= INPCK;
-    }
-
-    // VMIN=0, VTIME in deciseconds (select-based timeout done manually)
-    tio.c_cc[VMIN]  = 0;
-    tio.c_cc[VTIME] = 0;
-
-    if (tcsetattr(m_fd, TCSANOW, &tio) != 0) { close(); return false; }
-    tcflush(m_fd, TCIOFLUSH);
-    return true;
-}
-
-void FmbTransport::close()
-{
-    if (m_fd >= 0) {
-        ::close(m_fd);
-        m_fd = -1;
-    }
-}
-
-bool FmbTransport::is_open() const { return m_fd >= 0; }
-
-bool FmbTransport::send(const uint8_t* data, size_t len)
-{
-    if (!is_open()) return false;
-    ssize_t w = ::write(m_fd, data, len);
-    return w == static_cast<ssize_t>(len);
-}
-
-int FmbTransport::recv(uint8_t* buf, size_t max_bytes, uint32_t timeout_ms)
-{
-    if (!is_open()) return -1;
-
-    size_t total = 0;
-    uint32_t deadline_ms = timeout_ms;
-
-    while (total < max_bytes && deadline_ms > 0) {
-        fd_set rset;
-        FD_ZERO(&rset);
-        FD_SET(m_fd, &rset);
-        struct timeval tv;
-        tv.tv_sec  = deadline_ms / 1000u;
-        tv.tv_usec = (deadline_ms % 1000u) * 1000u;
-
-        int rc = select(m_fd + 1, &rset, nullptr, nullptr, &tv);
-        if (rc <= 0) break; // timeout or error
-
-        ssize_t r = ::read(m_fd, buf + total, max_bytes - total);
-        if (r <= 0) break;
-        total += static_cast<size_t>(r);
-
-        // After first byte: inter-character timeout (5 ms)
-        deadline_ms = 5;
-    }
-    return static_cast<int>(total);
-}
-
-void FmbTransport::flush_rx()
-{
-    if (is_open()) tcflush(m_fd, TCIFLUSH);
-}
-
-void FmbTransport::wait_t35()
-{
-    struct timespec ts;
-    ts.tv_sec  = 0;
-    ts.tv_nsec = static_cast<long>(m_t35_us) * 1000L;
-    nanosleep(&ts, nullptr);
-}
-
-#endif // _WIN32
-
-// ---- Platform-portable sleep ----
-void FmbTransport::sleep_ms(uint32_t ms)
-{
-    if (ms == 0) return;
+int FmbTransport::read_some(uint8_t* p,size_t n,uint32_t ms){
+    if(!is_open())return -1;
 #ifdef _WIN32
-    Sleep(ms);
+    if(!tcp_){DWORD count=0;if(!ReadFile(handle_,p,DWORD(n),&count,nullptr)){close();return -1;}if(!count)sleep_ms(std::min(ms,1u));return int(count);}
+    auto fd=socket_;
 #else
-    struct timespec ts;
-    ts.tv_sec  = ms / 1000u;
-    ts.tv_nsec = static_cast<long>(ms % 1000u) * 1000000L;
-    nanosleep(&ts, nullptr);
+    auto fd=fd_;
 #endif
+    fd_set r;FD_ZERO(&r);FD_SET(fd,&r);timeval tv{long(ms/1000),long(ms%1000*1000)};
+    int ready=select(int(fd)+1,&r,nullptr,nullptr,&tv);if(ready==0)return 0;
+    if(ready<0){close();return -1;}
+#ifdef _WIN32
+    int got=::recv(fd,reinterpret_cast<char*>(p),int(n),0);
+    if(got==SOCKET_ERROR&&WSAGetLastError()==WSAEWOULDBLOCK)return 0;
+#else
+    int got=int(tcp_ ? ::recv(fd,p,n,0) : ::read(fd,p,n));
+    if(got<0&&(errno==EAGAIN||errno==EINTR))return 0;
+#endif
+    if(got<=0){close();return -1;}return got;
+}
+bool FmbTransport::send(const uint8_t*p,size_t n){
+    if(!is_open()||!n||n>256)return false;
+    auto end=Clock::now()+std::chrono::milliseconds(timeout_ms_);size_t sent=0;
+    while(sent<n&&Clock::now()<end){
+#ifdef _WIN32
+        if(!tcp_){DWORD count=0;if(!WriteFile(handle_,p+sent,DWORD(n-sent),&count,nullptr)){close();return false;}sent+=count;continue;}
+        int count=::send(socket_,reinterpret_cast<const char*>(p+sent),int(n-sent),0);
+        if(count==SOCKET_ERROR&&WSAGetLastError()==WSAEWOULDBLOCK){sleep_ms(1);continue;}
+#else
+        int count=int(tcp_ ? ::send(fd_,p+sent,n-sent,MSG_NOSIGNAL) : ::write(fd_,p+sent,n-sent));
+        if(count<0&&(errno==EAGAIN||errno==EINTR)){sleep_ms(1);continue;}
+#endif
+        if(count<=0){close();return false;}sent+=size_t(count);
+    }
+    if(sent!=n){close();return false;}return true;
+}
+int FmbTransport::recv(uint8_t*p,size_t max,uint32_t timeout){
+    size_t total=0;auto end=Clock::now()+std::chrono::milliseconds(timeout);
+    while(Clock::now()<end){
+        uint8_t b[256];int got=read_some(b,sizeof(b),1);if(got<0)return -1;
+        for(int i=0;i<got;++i){
+            if(!total&&b[i]==255)continue; // Arbitration pulses precede, never belong to, an RTU ADU.
+            if(total>=max||total>=256)return -1;
+            p[total++]=b[i];int needed=fmb::response_length(p,total);
+            if(needed<0||needed>256)return -1;
+            if(needed&&total==size_t(needed)){
+                // Additional non-arbitration data in the same receive is unexpected contamination.
+                if(i+1<got)return -1;return int(total);
+            }
+        }
+    }
+    // Never return a partial frame as successful.
+    return 0;
+}
+void FmbTransport::flush_rx(){
+    if(!is_open())return;
+#ifdef _WIN32
+    if(!tcp_){PurgeComm(handle_,PURGE_RXCLEAR);return;}
+#else
+    if(!tcp_){tcflush(fd_,TCIFLUSH);return;}
+#endif
+    uint8_t buf[256];for(unsigned i=0;i<8;++i){int r=read_some(buf,sizeof(buf),0);if(r<=0)break;}
+}
+fmb::Frame FmbTransport::exchange(const fmb::Frame&q,uint32_t timeout){
+    wait_t35();flush_rx();if(!send(q))return {};
+    uint8_t bytes[256]{};int n=recv(bytes,sizeof(bytes),timeout);
+    return n>0?fmb::Frame(bytes,bytes+n):fmb::Frame{};
 }

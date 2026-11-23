@@ -1,93 +1,30 @@
 #include "fast_modbus_channel.h"
+#include "fmb_settings.h"
 #include <mplc/vm/node_typese.h>
-#include <cmath>
-
-void FastModbusRegChannel::Init(const mplc::vm::Channel* channel)
-{
-    // Read per-channel settings from the MS4 project tree.
-    // Settings keys match names configured in the MS4 protocol editor.
-
-    {
-        int v = static_cast<int>(FMB_TYPE_INPUT);
-        channel->get("RegType").GetInt(v);
-        reg_type = static_cast<uint8_t>(v);
-    }
-    {
-        int v = 0;
-        channel->get("RegAddr").GetInt(v);
-        reg_addr = static_cast<uint16_t>(v);
-    }
-    {
-        int v = 1;
-        channel->get("Scale").GetInt(v); // stored as int * 1000 to avoid float settings
-        // If Scale is 0 (default for GetInt fallback), use 1.0
-        // Prefer float if the setting is stored as REAL
-        float fv = 1.0f;
-        // Try REAL path first; if GetInt succeeded with non-zero, it might be 1000x
-        // The simplest approach: treat Scale as float directly if stored as REAL.
-        // For integer fallback, leave scale at 1.0f.
-        (void)v;
-        channel->get("Scale").Get<float>(fv);
-        scale = (fv == 0.0f) ? 1.0f : fv;
-    }
-    {
-        float fv = 0.0f;
-        channel->get("Offset").Get<float>(fv);
-        offset = fv;
-    }
-    {
-        int v = static_cast<int>(FMB_PRIO_HIGH);
-        channel->get("Priority").GetInt(v);
-        if (v < 0) v = 0;
-        if (v > 2) v = 2;
-        prio = static_cast<uint8_t>(v);
-    }
-    {
-        // Anti-spam / rate-limit settings
-        float fv = 0.0f;
-        channel->get("Deadband").Get<float>(fv);
-        filter.deadband = static_cast<double>(fv);
-    }
-    {
-        int v = 0;
-        channel->get("MinIntervalMs").GetInt(v);
-        filter.min_interval_ms = static_cast<uint32_t>(v > 0 ? v : 0);
-    }
-    {
-        int v = 0;
-        channel->get("BurstWindowMs").GetInt(v);
-        filter.burst_window_ms = static_cast<uint32_t>(v > 0 ? v : 0);
-    }
-    {
-        int v = 0;
-        channel->get("BurstMaxEvents").GetInt(v);
-        filter.burst_max_events = static_cast<uint16_t>(v > 0 ? v : 0);
-    }
-}
-
-void FastModbusRegChannel::push_value(double value, LuaDataProvider* provider)
-{
-    double physical = value * static_cast<double>(scale) + static_cast<double>(offset);
-    Write<float>(provider, static_cast<float>(physical));
-}
-
-void FastModbusRegChannel::on_event(double raw_value,
-                                     std::chrono::steady_clock::time_point ts,
-                                     LuaDataProvider* provider)
-{
-    if (filter.should_commit(raw_value, ts)) {
-        push_value(raw_value, provider);
-        filter.mark_committed(raw_value, ts);
-    }
-    // else: filter stored it as pending
-}
-
-void FastModbusRegChannel::flush_pending(std::chrono::steady_clock::time_point now,
-                                          LuaDataProvider* provider)
-{
-    double val = 0.0;
-    if (filter.try_flush_pending(now, val)) {
-        push_value(val, provider);
-        filter.mark_committed(val, now);
-    }
+void FastModbusRegChannel::Init(const mplc::vm::Channel* channel){
+    // Native Channel settings omit scalar zero values. Missing numeric entries
+    // therefore mean zero (Coils/U16/disabled priority), not a nonzero default.
+    int type=fmb_setting(channel,"RegType",0);
+    int addr=fmb_setting(channel,"RegAddr",0);
+    int priority=fmb_setting(channel,"Priority",0);
+    int valueType=fmb_setting(channel,"ValueType",0);
+    int order=fmb_setting(channel,"WordOrder",0);
+    int interval=fmb_setting(channel,"MinIntervalMs",0);
+    int window=fmb_setting(channel,"BurstWindowMs",0);
+    int count=fmb_setting(channel,"BurstMaxEvents",0);
+    state.valid=type>=0&&type<=3&&addr>=0&&addr<=65535&&priority>=0&&priority<=2&&
+        valueType>=0&&valueType<=4&&order>=0&&order<=1&&interval>=0&&window>=0&&count>=0;
+    state.type=uint8_t(type);state.reg=uint16_t(addr);state.priority=uint8_t(priority);
+    state.value_type=fmb::ValueType(valueType);state.low_word_first=order!=0;
+    // A scale must be explicitly nonzero; an omitted/zero scale is invalid.
+    state.scale=fmb_setting(channel,"Scale",0.0);
+    state.offset=fmb_setting(channel,"Offset",0.0);
+    state.filter.deadband=fmb_setting(channel,"Deadband",0.0);
+    state.filter.min_interval_ms=uint32_t(interval);state.filter.burst_window_ms=uint32_t(window);
+    state.filter.burst_max_events=uint32_t(count);
+    state.sink=[this](double value,bool good,fmb::Source){
+        if(!InVar)return;
+        if(good)InVar.Set(value,{},OpcUa_Good);
+        else InVar.SetQuality(OpcUa_BadCommunicationError);
+    };
 }
