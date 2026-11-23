@@ -170,9 +170,15 @@ void Engine::poll_events(uint64_t now){
     auto r=transact(build_event_request(min_slave_,248,ack_slave_,ack_flag_));
     if(r.empty())return; // Keep confirmation for retry; ACK loss must not lose the batch.
     std::vector<FmbEvent> events;uint8_t slave=0,flag=0;
-    int result=parse_event_response(r.data(),r.size(),events,slave,flag);
+    EventWire format;
+    int result=parse_event_response(r.data(),r.size(),events,slave,flag,format);
     if(result<0){++counters.bad_frames;return;}
-    if(!result){min_slave_=1;ack_slave_=ack_flag_=0;return;}
+    if(!result){
+        const bool confirmed_legacy = format==EventWire::CyntronLegacy && ack_slave_==r[0] &&
+                                      uint8_t(ack_flag_^0xff)==r[3];
+        min_slave_=confirmed_legacy && ack_slave_<247 ? uint8_t(ack_slave_+1) : 1;
+        ack_slave_=ack_flag_=0;return;
+    }
     ++counters.event_packets;
     // An empty payload is not a received batch: do not acknowledge undelivered entries.
     if(events.empty()){min_slave_=slave==247?1:uint8_t(slave+1);return;}
@@ -201,8 +207,12 @@ void Engine::poll_events(uint64_t now){
         }
     }
     // Consume a structurally valid batch, including unknown events, exactly once.
+    // Older CYNTRON responders consume ACK only after winning arbitration.
+    // Give the first ACK a chance to reach its sender before rotating.
+    const bool needs_turn = format==EventWire::CyntronLegacy &&
+                            (ack_slave_!=slave || ack_flag_==flag);
     ack_slave_=slave;ack_flag_=flag;
-    min_slave_=slave==247?1:uint8_t(slave+1); // Fairness: hot low-address devices cannot starve higher addresses.
+    min_slave_=needs_turn?slave:(slave==247?1:uint8_t(slave+1)); // Fairness: hot low-address devices cannot starve higher addresses.
 }
 void Engine::scan(){
     auto r=transact(scan_first_?build_scan_start():build_scan_next());scan_first_=false;

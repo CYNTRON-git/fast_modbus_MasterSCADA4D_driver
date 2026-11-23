@@ -77,7 +77,7 @@ static void codecs(){
     CHECK(ev[0].type==3&&ev[0].reg_addr==403&&ev[0].payload_len==2);
     double v=0;CHECK(decode_value(ev[0].payload,2,true,ValueType::U16,false,v)&&v==4660);
     auto end=seal({253,70,18});CHECK(parse_event_response(end.data(),end.size(),ev,a,flag)==0&&a==0);
-    auto legacy=seal({12,70,18,85});CHECK(parse_event_response(legacy.data(),legacy.size(),ev,a,flag)==-1);
+    auto legacy=seal({12,70,18,85});CHECK(parse_event_response(legacy.data(),legacy.size(),ev,a,flag)==0&&a==0&&flag==0);
     auto unknown=event(12,1,0x99,0,{1,2,3});CHECK(parse_event_response(unknown.data(),unknown.size(),ev,a,flag)==1&&ev[0].type==255);
     auto reboot=event(12,2,15,0,{});CHECK(parse_event_response(reboot.data(),reboot.size(),ev,a,flag)==1&&ev[0].type==15);
     f=event(12,3,4,403,{1,2});f[5]=20;f.resize(f.size()-2);FmbTransport::append_crc(f);
@@ -252,6 +252,47 @@ static void output_gate(){
     CHECK(!gate.take(std::numeric_limits<double>::quiet_NaN(),true,true));
     CHECK(gate.take(4,true,true));
 }
+static void legacy_events() {
+    std::vector<FmbEvent> events;
+    uint8_t addr=0, flag=0;
+    // First capture on COM4, MR-02m 1.0.10.38 at address 6.
+    Frame captured{6,70,17,0x55,32,160};
+    for (unsigned i=0;i<32;++i) {
+        const unsigned val=0xf27e + 5*i;
+        captured.insert(captured.end(), {3,0,105,uint8_t(val>>8),uint8_t(val)});
+    }
+    captured=seal(captured);
+    CHECK(captured[captured.size()-2]==0xd8 && captured.back()==0x2e);
+    CHECK(parse_event_response(captured.data(),captured.size(),events,addr,flag)==1);
+    CHECK(addr==6 && flag==0x55 && events.size()==32);
+    CHECK(events[0].type==3 && events[0].reg_addr==105 && events[0].payload[0]==0x7e && events[0].payload[1]==0xf2);
+    Frame end=seal({6,70,18,0xaa});
+    CHECK(response_length(end.data(),3)==6 && parse_event_response(end.data(),end.size(),events,addr,flag)==0 && addr==0 && flag==0);
+    auto bad_end=seal({6,70,18,0x12});
+    CHECK(parse_event_response(bad_end.data(),bad_end.size(),events,addr,flag)==-1);
+    Frame mixed=seal({8,70,17,0xaa,4,16,0,0,3,1,1,0,8,0,2,0,1,0,1,15,0,0});
+    CHECK(parse_event_response(mixed.data(),mixed.size(),events,addr,flag)==1 && events.size()==4);
+    CHECK(events[0].type==0 && events[1].type==1 && events[2].reg_addr==1 && events[3].type==15);
+    for (Frame invalid : {seal({8,70,17,0x00,1,5,2,0,1,0,1}),
+                          seal({8,70,17,0x55,2,5,2,0,1,0,1}),
+                          seal({8,70,17,0xaa,1,4,0,0,1,2}),
+                          seal({8,70,17,0x55,1,5,2,0,1,0}),
+                          seal({8,70,17,0xaa,1,3,15,0,1}),
+                          seal({8,70,17,0x55,1,4,0,99,0,1})}) {
+        // The last packet fits both a WB unknown event and a legacy COIL.
+        CHECK(parse_event_response(invalid.data(),invalid.size(),events,addr,flag)<0 && events.empty() && !addr && !flag);
+    }
+    Fixture f;
+    f.tick(100);
+    f.bus.events.push_back(seal({12,70,17,0x55,1,5,3,1,0x93,0x12,0x34}));
+    f.tick(200);
+    CHECK(f.event_values==1 && f.last==0x1234);
+    f.bus.events.push_back(seal({12,70,18,0xaa}));
+    f.tick(300);
+    CHECK(f.bus.requests.back()[3]==12 && f.bus.requests.back()[5]==12 && f.bus.requests.back()[6]==0x55);
+    f.tick(400);
+    CHECK(f.bus.requests.back()[5]==0 && f.bus.requests.back()[6]==0);
+}
 static void fuzz_parser(){
     std::mt19937 rng(20261122);std::vector<FmbEvent>ev;uint8_t a,b;
     for(unsigned trial=0;trial<100000;++trial){
@@ -270,7 +311,7 @@ int main(int argc,char**argv){
         if(!validate_read(r,12,4,1,v)){std::cerr<<"READ FAILED\n";return 3;}std::cout<<"VALUE "<<v[0]<<"\n";return 0;
     }
     try{
-        for(auto test:{codecs,values,response_validation,filters,engine_initial_and_events,fallback_and_retries,loss_and_recovery,write_commands,multiword_and_serial,validation_and_budget,sparse_subscriptions,reboot_and_scan,mixed_classic_and_events,output_gate,fuzz_parser}){test();++groups;}
+        for(auto test:{codecs,values,response_validation,filters,engine_initial_and_events,fallback_and_retries,loss_and_recovery,write_commands,multiword_and_serial,validation_and_budget,sparse_subscriptions,reboot_and_scan,mixed_classic_and_events,output_gate,legacy_events,fuzz_parser}){test();++groups;}
         std::cout<<"PASS "<<groups<<" groups "<<checks<<" assertions\n";return 0;
     }catch(const std::exception&e){std::cerr<<"FAIL "<<e.what()<<" after "<<checks<<" assertions\n";return 1;}
 }

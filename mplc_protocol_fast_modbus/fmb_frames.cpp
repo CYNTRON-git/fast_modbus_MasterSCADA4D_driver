@@ -42,26 +42,89 @@ bool parse_scan_response(const uint8_t*f,size_t n,FmbScanItem& out){
     out.serial=r32(f+3);out.modbus_addr=f[7];return true;
 }
 bool scan_finished(const uint8_t*f,size_t n){return n==5&&f[0]==253&&(f[1]==70||f[1]==96)&&f[2]==4&&FmbTransport::check_crc(f,n);}
-int parse_event_response(const uint8_t*f,size_t n,std::vector<FmbEvent>& out,uint8_t& as,uint8_t& af){
-    out.clear();as=af=0;
-    if(n<5||n>256||f[1]!=70||!FmbTransport::check_crc(f,n))return -1;
-    if(f[2]==18)return n==5&&f[0]==253?0:-1;
-    if(f[2]!=17||n<8||f[0]<1||f[0]>247||size_t(f[5])+8!=n)return -1;
-    std::vector<FmbEvent> parsed;
+static bool legacy_event_flag(uint8_t flag) {
+    return flag == 0x55 || flag == 0xaa;
+}
+static bool wb_event_list(const uint8_t* f, size_t n, std::vector<FmbEvent>& events) {
     size_t p=6,end=n-2;
     while(p<end){
-        if(end-p<4)return -1;
+        if(end-p<4)return false;
         FmbEvent e{};e.slave_id=f[0];e.payload_len=f[p];const auto wire=f[p+1];e.reg_addr=r16(f+p+2);p+=4;
-        if(e.payload_len>end-p)return -1;
+        if(wire==0 || e.payload_len>end-p)return false;
         e.type=(wire>=1&&wire<=4)?uint8_t(wire-1):(wire==15?15:255);
         if((e.type<=1&&(e.payload_len!=1||f[p]>1))||
            ((e.type==2||e.type==3)&&e.payload_len!=2&&e.payload_len!=4)||
-           (e.type==15&&(e.payload_len!=0||e.reg_addr!=0)))return -1;
-        std::memcpy(e.payload,f+p,e.payload_len);p+=e.payload_len;parsed.push_back(e);
+           (e.type==15&&(e.payload_len!=0||e.reg_addr!=0)))return false;
+        std::memcpy(e.payload,f+p,e.payload_len);p+=e.payload_len;events.push_back(e);
     }
     // N is all pending events, not the number of entries in this payload.
-    if(parsed.size()>f[4])return -1;
-    out.swap(parsed);as=f[0];af=f[3];return 1;
+    if(events.size()>f[4])return false;
+    return true;
+}
+// CYNTRON MR-02m 1.0.10.38 (fast_modbus 42a0ee5) reports the exact count
+// and omits the length byte. Normalize words to the WB little-endian payload.
+static bool legacy_event_list(const uint8_t* f, size_t n, std::vector<FmbEvent>& events) {
+    if (!legacy_event_flag(f[3]) || !f[4]) return false;
+    size_t pos = 6;
+    const size_t end = n - 2;
+    while (pos < end) {
+        if (end - pos < 3) return false;
+        FmbEvent event{};
+        event.slave_id = f[0];
+        event.type = f[pos++];
+        event.reg_addr = r16(f + pos);
+        pos += 2;
+        switch (event.type) {
+        case FMB_TYPE_COIL:
+        case FMB_TYPE_DISCRETE:
+            if (pos == end || f[pos] > 1) return false;
+            event.payload_len = 1;
+            event.payload[0] = f[pos++];
+            break;
+        case FMB_TYPE_HOLDING:
+        case FMB_TYPE_INPUT:
+            if (end - pos < 2) return false;
+            event.payload_len = 2;
+            event.payload[0] = f[pos + 1];
+            event.payload[1] = f[pos];
+            pos += 2;
+            break;
+        case FMB_TYPE_REBOOT:
+            if (event.reg_addr != 0) return false;
+            break;
+        default:
+            return false;
+        }
+        events.push_back(event);
+    }
+    return events.size() == f[4];
+}
+int parse_event_response(const uint8_t*f,size_t n,std::vector<FmbEvent>& out,uint8_t& as,uint8_t& af){
+    EventWire format;
+    return parse_event_response(f,n,out,as,af,format);
+}
+int parse_event_response(const uint8_t*f,size_t n,std::vector<FmbEvent>& out,uint8_t& as,uint8_t& af,EventWire& format){
+    format=EventWire::WB;
+    out.clear();as=af=0;
+    if(n<5||n>256||f[1]!=70||!FmbTransport::check_crc(f,n))return -1;
+    if (f[2] == FMB_SUB_EVT_NONE) {
+        if (n == 5 && f[0] == FMB_BROADCAST_ADDR) return 0;
+        if (n == 6 && f[0] >= 1 && f[0] <= 247 && legacy_event_flag(f[3])) {
+            format=EventWire::CyntronLegacy;
+            return 0;
+        }
+        return -1;
+    }
+    if(f[2]!=17||n<8||f[0]<1||f[0]>247||size_t(f[5])+8!=n)return -1;
+    std::vector<FmbEvent> wb, legacy;
+    const bool is_wb = wb_event_list(f, n, wb);
+    const bool is_legacy = legacy_event_list(f, n, legacy);
+    // Ambiguous frames cannot establish which values or registers are being
+    // offered. Do not publish data or return an acknowledgment for them.
+    if (is_wb == is_legacy) return -1;
+    format=is_wb ? EventWire::WB : EventWire::CyntronLegacy;
+    out.swap(is_wb ? wb : legacy);
+    as=f[0];af=f[3];return 1;
 }
 bool exception(const Frame&f,uint8_t a,uint8_t fc,uint8_t& code){
     if(f.size()!=5||f[0]!=a||f[1]!=(fc|128)||!FmbTransport::check_crc(f.data(),f.size()))return false;
@@ -129,7 +192,8 @@ int response_length(const uint8_t*b,size_t n){
     if(n<3)return 0;
     switch(b[2]){
     case 3:return 10;
-    case 4:case 18:return 5;
+    case 4:return 5;
+    case 18:return b[0]==FMB_BROADCAST_ADDR?5:6;
     case 17:return n<6?0:int(b[5])+8;
     case 24:return n<4?0:int(b[3])+6;
     case 9:{

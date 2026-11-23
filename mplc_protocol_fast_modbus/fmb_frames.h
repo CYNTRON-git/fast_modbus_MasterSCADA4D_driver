@@ -17,6 +17,8 @@ bool unwrap_serial(const Frame& response,uint32_t serial,uint8_t slave,Frame& in
 bool parse_scan_response(const uint8_t*,size_t,FmbScanItem&);
 bool scan_finished(const uint8_t*,size_t);
 int parse_event_response(const uint8_t*,size_t,std::vector<FmbEvent>&,uint8_t& ack_slave,uint8_t& ack_flag);
+enum class EventWire { WB, CyntronLegacy };
+int parse_event_response(const uint8_t*,size_t,std::vector<FmbEvent>&,uint8_t& ack_slave,uint8_t& ack_flag,EventWire& format);
 std::vector<uint16_t> parse_read_response(const uint8_t*,size_t);
 bool validate_read(const Frame& response,uint8_t addr,uint8_t fc,uint16_t count,std::vector<uint16_t>& values);
 bool validate_write(const Frame& request,const Frame& response);
