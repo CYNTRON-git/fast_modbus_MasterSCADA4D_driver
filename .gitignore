@@ -10,3 +10,5 @@ docs/
 /platform/linux/api/log.txt
 /platform/linux/api/mplc_lib_so/*
 !/platform/linux/api/mplc_lib_so/.gitkeep
+
+/build/

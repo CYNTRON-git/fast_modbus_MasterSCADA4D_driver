@@ -6,6 +6,8 @@
 
 Две обязательные части расширения: библиотечный тип **FastModbus** с `SubTypeName=FastModbus`, наследующий «ФБ протокол», и `mplc_protocol_fast_modbus.dll/.so`. Одна DLL не добавляет тип в палитру IDE. `tools/project/` создаёт отдельный испытательный проект штатным C# API; рабочая база Сколково не используется.
 
+Для сборки ARM на Mac mini используйте `./tools/build_mac.sh /абсолютный/путь/к/новой/сборке`. Журнал, ABI и `work/API/platform/linux/api/mplc_protocol_fast_modbus.so` сохраняются в указанном каталоге. Автономные тесты запускаются через `./build.sh host-tests`.
+
 ## Проверяемое поведение
 
 * Формат событий WB: LEN, TYPE, ID big-endian, VALUE little-endian; типы на проводе 1…4, REBOOT=15. В настройке RegType остаются прежние значения 0…3.
