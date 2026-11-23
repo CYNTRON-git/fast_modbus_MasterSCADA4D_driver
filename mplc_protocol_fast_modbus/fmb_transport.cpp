@@ -64,7 +64,9 @@ bool FmbTransport::open_tcp(const std::string& text,uint32_t ms){
     int r=::connect(fd_,reinterpret_cast<sockaddr*>(&address),sizeof(address));
     if(r<0&&errno!=EINPROGRESS){close();return false;}auto fd=fd_;
 #endif
-    fd_set w;FD_ZERO(&w);FD_SET(fd,&w);timeval tv{long(ms/1000),long(ms%1000*1000)};
+    fd_set w;FD_ZERO(&w);FD_SET(fd,&w);timeval tv{};
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
     int selected=select(int(fd)+1,nullptr,&w,nullptr,&tv);
     int err=0;
 #ifdef _WIN32
@@ -132,7 +134,9 @@ int FmbTransport::read_some(uint8_t* p,size_t n,uint32_t ms){
 #else
     auto fd=fd_;
 #endif
-    fd_set r;FD_ZERO(&r);FD_SET(fd,&r);timeval tv{long(ms/1000),long(ms%1000*1000)};
+    fd_set r;FD_ZERO(&r);FD_SET(fd,&r);timeval tv{};
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
     int ready=select(int(fd)+1,&r,nullptr,nullptr,&tv);if(ready==0)return 0;
     if(ready<0){close();return -1;}
 #ifdef _WIN32
